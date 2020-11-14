@@ -8,6 +8,7 @@ import functools
 import datetime
 
 import bs4
+import locale
 import dateutil.parser
 import beancount.core.amount
 from beancount.core.amount import Amount
@@ -15,6 +16,7 @@ from beancount.core.number import D, ZERO, Decimal
 
 from ..amount_parsing import parse_amount, parse_number
 
+locale.setlocale(locale.LC_ALL, "es_ES")
 
 Errors = List[str]
 Adjustment = NamedTuple('Adjustment', [
@@ -148,7 +150,8 @@ def reduce_adjustments(adjustments: List[Adjustment]) -> List[Adjustment]:
 
 def parse_shipments(soup) -> List[Shipment]:
 
-    shipped_pattern = '^Shipped on ([^\\n]+)$'
+    shipped_pattern = '^Enviado\s+el\s+([^\\n]+)$'
+    # TODO: translate
     nonshipped_headers = {
         'Service completed',
         'Preparing for Shipment',
@@ -173,7 +176,7 @@ def parse_shipments(soup) -> List[Shipment]:
         if text not in nonshipped_headers:
             m = re.match(shipped_pattern, text)
             assert m is not None
-            shipped_date = dateutil.parser.parse(m.group(1)).date()
+            shipped_date = datetime.datetime.strptime(m.group(1), "%d de %B de %Y").date()
 
         items = []
 
@@ -185,10 +188,11 @@ def parse_shipments(soup) -> List[Shipment]:
             tds = node('td')
             if len(tds) < 2:
                 return False
-            return (tds[0].text.strip() == 'Items Ordered' and
-                    tds[1].text.strip() == 'Price')
+            return (tds[0].text.strip() == 'Productos comprados:' and
+                    tds[1].text.strip() == 'Precio')
 
         items_ordered_header = shipment_table.find(is_items_ordered_header)
+        #print(items_ordered_header)
 
         item_rows = items_ordered_header.find_next_siblings('tr')
 
@@ -198,7 +202,8 @@ def parse_shipments(soup) -> List[Shipment]:
             price_node = tds[1]
             price = price_node.text.strip()
 
-            pattern_without_condition = r'^\s*(?P<quantity>[0-9]+)\s+of:(?P<description>.*)\n\s*(?:Sold|Provided) by:? (?P<sold_by>[^\n]+)'
+            # TODO: finish translation
+            pattern_without_condition = r'^\s*(?P<quantity>[0-9]+)\s+de:(?P<description>.*)\n\s*(?:Vendido|Provided) por:? (?P<sold_by>[^\n]+)'
             pattern_with_condition = pattern_without_condition + r'\n.*\n\s*Condition: (?P<condition>[^\n]+)'
 
             m = re.match(pattern_with_condition, description_node.text,
@@ -226,7 +231,7 @@ def parse_shipments(soup) -> List[Shipment]:
                 ))
 
         items_subtotal = parse_amount(
-            get_field_in_table(shipment_table, r'Item\(s\) Subtotal:'))
+            get_field_in_table(shipment_table, r'Subtotal de producto\(s\):'))
         expected_items_subtotal = reduce_amounts(
             beancount.core.amount.mul(x.price, D(x.quantity)) for x in items)
         if (items_subtotal is not None and
@@ -244,7 +249,7 @@ def parse_shipments(soup) -> List[Shipment]:
             a.amount for a in output_fields['pretax_adjustments']
         ]
         total_before_tax = parse_amount(
-            get_field_in_table(shipment_table, 'Total before tax:'))
+            get_field_in_table(shipment_table, 'Total antes de impuestos:'))
         expected_total_before_tax = reduce_amounts(pretax_parts)
         if total_before_tax is None:
             total_before_tax = expected_total_before_tax
@@ -253,13 +258,13 @@ def parse_shipments(soup) -> List[Shipment]:
                 'expected total before tax is %s, but parsed value is %s' %
                 (expected_total_before_tax, total_before_tax))
 
-        sales_tax = get_adjustments_in_table(shipment_table, 'Sales Tax:')
+        sales_tax = get_adjustments_in_table(shipment_table, 'Importe:')
 
         posttax_parts = (
             [total_before_tax] + [a.amount for a in sales_tax] +
             [a.amount for a in output_fields['posttax_adjustments']])
         total = parse_amount(
-            get_field_in_table(shipment_table, 'Total for This Shipment:'))
+            get_field_in_table(shipment_table, 'Importe total:'))
         expected_total = reduce_amounts(posttax_parts)
         if total is None:
             total = expected_total
@@ -293,7 +298,7 @@ def parse_credit_card_transactions_from_payments_table(
         r'\n\s*([^\s|][^|\n]*[^|\s])\s+\|\s+Last (?:4 )?digits:\s+([0-9]{4})\n',
         payment_text)
     if m is None:
-        m = re.search(r'\n\s*(.+)\s+ending in\s+([0-9]{4})\n', payment_text)
+        m = re.search(r'\n\s*(.+)\s+que termina en\s+([0-9]{4})\n', payment_text)
 
     if m is not None:
         credit_card_transactions = [
@@ -312,7 +317,7 @@ def parse_credit_card_transactions_from_payments_table(
 def parse_credit_card_transactions(soup) -> List[CreditCardTransaction]:
     def is_header_node(node):
         return node.name == 'td' and node.text.strip(
-        ) == 'Credit Card transactions'
+        ) == 'Transacciones de la tarjeta de pago'
 
     header_node = soup.find(is_header_node)
     if header_node is None:
@@ -326,12 +331,12 @@ def parse_credit_card_transactions(soup) -> List[CreditCardTransaction]:
         tds = row('td')
         description = tds[0].text.strip()
         amount_text = tds[1].text.strip()
-        m = re.match(r'^([^:]+) ending in ([0-9]+):\s+([^:]+):$', description,
+        m = re.match(r'^([^:]+) que termina en ([0-9]+):\s+([^:]+):$', description,
                      re.UNICODE)
         assert m is not None
         transactions.append(
             CreditCardTransaction(
-                date=dateutil.parser.parse(m.group(3)).date(),
+                date=datetime.datetime.strptime(m.group(3), "%d de %B de %Y").date(),
                 card_description=m.group(1),
                 card_ending_in=m.group(2),
                 amount=parse_amount(amount_text),
@@ -351,7 +356,7 @@ def parse_regular_order_invoice(path: str) -> Order:
         soup = bs4.BeautifulSoup(f.read(), 'lxml')
     shipments = parse_shipments(soup)
     payment_table_header = soup.find(
-        lambda node: node.name == 'table' and re.match('^Payment information$', node.text.strip()))
+        lambda node: node.name == 'table' and re.match('^Información de pago$', node.text.strip()))
 
     payment_table = payment_table_header.find_parent('table')
 
@@ -420,7 +425,7 @@ def parse_regular_order_invoice(path: str) -> Order:
     payments_total_adjustment = reduce_amounts(payments_total_adjustments)
     shipments_total_adjustment = reduce_amounts(shipments_total_adjustments)
     grand_total = parse_amount(
-        get_field_in_table(payment_table, 'Grand Total:'))
+        get_field_in_table(payment_table, 'Importe total:'))
 
     expected_total = add_amount(shipments_total_adjustment,
                                 reduce_amounts(x.total for x in shipments))
@@ -428,16 +433,19 @@ def parse_regular_order_invoice(path: str) -> Order:
     if expected_total != adjusted_grand_total:
         errors.append('expected grand total is %s, but parsed value is %s' %
                       (expected_total, adjusted_grand_total))
-    order_placed_pattern = r'(?:Subscribe and Save )?Order Placed:\s+([^\s]+ \d+, \d{4})'
+    # TODO: translation incomplete
+    order_placed_pattern = r'Pedido realizado:\s+(.*)'
 
     def is_order_placed_node(node):
+        #print("Node text: {}".format(node.text.strip()))
         m = re.fullmatch(order_placed_pattern, node.text.strip())
         return m is not None
 
     node = soup.find(is_order_placed_node)
+    #print(node)
     m = re.fullmatch(order_placed_pattern, node.text.strip())
     assert m is not None
-    order_date = dateutil.parser.parse(m.group(1)).date()
+    order_date = datetime.datetime.strptime(m.group(1), "%d de %B de %Y").date()
 
     credit_card_transactions = parse_credit_card_transactions(soup)
     if not credit_card_transactions:
@@ -454,7 +462,8 @@ def parse_regular_order_invoice(path: str) -> Order:
                       (total_payments, adjusted_grand_total))
 
     title = soup.find('title').text.strip()
-    m = re.fullmatch(r'.*Order ([0-9\-]+)', title.strip())
+    #print("title: {}".format(title))
+    m = re.fullmatch(r'.*Pedido ([0-9\-]+)', title.strip())
     assert m is not None
 
     return Order(
@@ -500,7 +509,7 @@ def parse_digital_order_invoice(path: str) -> Optional[Order]:
         if m is None:
             return False
         try:
-            dateutil.parser.parse(m.group(1))
+            datetime.datetime.strptime(m.group(1), "%d de %B de %Y")
             return True
         except:
             return False
@@ -510,7 +519,7 @@ def parse_digital_order_invoice(path: str) -> Optional[Order]:
     digital_order_table = digital_order_header.find_parent('table')
     m = re.match(digital_order_pattern, digital_order_header.text.strip())
     assert m is not None
-    order_date = dateutil.parser.parse(m.group(1)).date()
+    order_date = datetime.datetime.strptime(m.group(1), "%d de %B de %Y").date()
 
     def is_items_ordered_header(node):
         if node.name != 'tr':
@@ -556,8 +565,8 @@ def parse_digital_order_invoice(path: str) -> Optional[Order]:
                     continue
                 return m.group(1)
 
-        by = get_label_value('By')
-        sold_by = get_label_value(r'Sold\s+By')
+        by = get_label_value('Por')
+        sold_by = get_label_value(r'Vendido\s+Por')
 
         items.append(
             DigitalItem(
@@ -600,11 +609,11 @@ def parse_digital_order_invoice(path: str) -> Optional[Order]:
             amounts[key] = amount
         return amounts
 
-    items_subtotal = parse_amount(get_other_field(r'Item\(s\) Subtotal:'))
-    total_before_tax = parse_amount(get_other_field('Total Before Tax:'))
-    tax = get_adjustments('Tax Collected:')
+    items_subtotal = parse_amount(get_other_field(r'Subtotal de producto\(s\):'))
+    total_before_tax = parse_amount(get_other_field('Total antes de impuestos:'))
+    tax = get_adjustments('Impuestos:')
     total_for_this_order = parse_amount(
-        get_other_field('Total for this Order:'))
+        get_other_field('Total:'))
     output_fields = dict()
     output_fields['pretax_adjustments'] = get_adjustments(
         pretax_adjustment_fields_pattern)
@@ -633,7 +642,7 @@ def parse_digital_order_invoice(path: str) -> Optional[Order]:
         errors=errors,
         **output_fields)
 
-    order_id_pattern = '^Amazon.com\\s+order number:\\s+(D[0-9-]+)$'
+    order_id_pattern = '^Pedido Amazon.es número:\\s+(D[0-9-]+)$'
 
     order_id_td = soup.find(lambda node: node.name == 'td' and re.match(order_id_pattern, node.text.strip()))
     m = re.match(order_id_pattern, order_id_td.text.strip())
@@ -641,7 +650,7 @@ def parse_digital_order_invoice(path: str) -> Optional[Order]:
     order_id = m.group(1)
 
     payment_table = soup.find(
-        lambda node: node.name == 'table' and node.text.strip().startswith('Payment Information')
+        lambda node: node.name == 'table' and node.text.strip().startswith('Información de pago')
     )
     credit_card_transactions = parse_credit_card_transactions_from_payments_table(
         payment_table, order_date)

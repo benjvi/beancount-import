@@ -1,6 +1,10 @@
 import re
 from beancount.core.number import D
 from beancount.core.amount import Amount
+import locale
+import decimal
+
+locale.setlocale(locale.LC_ALL, "es_ES")
 
 def parse_negative_parentheses(x):
     """Parses a string in parentheses as a negative."""
@@ -30,14 +34,16 @@ def parse_amount(x):
     if not x:
         return None
     sign, amount_str = parse_possible_negative(x)
-    m = re.fullmatch(r'([\$€£])?((?:[0-9](?:,?[0-9])*|(?=\.))(?:\.[0-9]+)?)(?:\s+([A-Z]{3}))?', amount_str)
+    m = re.fullmatch(r'([\$€£])?(EUR )?((?:[0-9](?:\,?[0-9])*|(?=,))(?:,[0-9]+)?)(?:\s+([A-Z]{3}))?', amount_str)
     if m is None:
         raise ValueError('Failed to parse amount from %r' % amount_str)
     if m.group(1):
         currency = {'$': 'USD', '€': 'EUR', '£': 'GBP'}[m.group(1)]
-    elif m.group(3):
+    elif m.group(2):
+        currency = 'EUR' 
+    elif m.group(4):
         currency = m.group(3)
     else:
         raise ValueError('Failed to determine currency from %r' % amount_str)
-    number = D(m.group(2))
+    number = locale.atof(m.group(3), decimal.Decimal)
     return Amount(number * sign, currency)
